@@ -12,7 +12,9 @@ fn print_help() {
     println!("OPTIONS:");
     println!("    --benchmark, --product-benchmark   Execute full release benchmark & stress scorecard");
     println!("    --info, --devices                  Enumerate and display available GPU compute adapters");
+    println!("    --adapter <INDEX_OR_NAME>          Explicitly select GPU compute adapter by index or substring");
     println!("    --test-alu                         Verify quaternary CPU ALU arithmetic & logic");
+    println!("    --test-crypto                      Test 128-bit SPN block cipher and Strict Avalanche Criterion");
     println!("    --test-gpu                         Run smoke test for Direct3D 11 compute pipeline");
     println!("    --gui                              Launch interactive Win32 studio dashboard (default)");
     println!("    -h, --help                         Print this help menu");
@@ -20,6 +22,13 @@ fn print_help() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for --adapter argument
+    for i in 0..args.len() {
+        if args[i] == "--adapter" && i + 1 < args.len() {
+            std::env::set_var("AETHER_DCC_ADAPTER", &args[i + 1]);
+        }
+    }
 
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         print_help();
@@ -42,6 +51,24 @@ fn main() {
                 if a.is_reference_target { "[Reference Target 0x9B41]" } else { "" }
             );
         }
+        return;
+    }
+
+    if args.iter().any(|arg| arg == "--test-crypto") {
+        println!("==== Verifying 128-bit SPN Block Cipher & Diffusion ====");
+        let key = *b"K3yF0rSpnC1ph3r!";
+        let salt = *b"C0nt3nt10nS4lt!#";
+        let plain = *b"Hello Aether DCC";
+        let cipher = aether_dcc::ghost_spn_encrypt_block(&plain, &key, &salt, 4);
+        let decrypted = aether_dcc::ghost_spn_decrypt_block(&cipher, &key, &salt, 4);
+        assert_eq!(plain, decrypted, "Decryption mismatch!");
+        println!("Plaintext:  {:?}", String::from_utf8_lossy(&plain));
+        println!("Ciphertext: {:02x?}", cipher);
+        println!("Decrypted:  {:?}", String::from_utf8_lossy(&decrypted));
+        let sac = aether_dcc::calculate_sac_percentage(&key, &salt);
+        println!("Strict Avalanche Criterion (SAC): {:.2}% (Target: 45.0% - 55.0%)", sac);
+        assert!((45.0..=55.0).contains(&sac), "SAC out of cryptographic bounds");
+        println!("SPN Block Cipher & Avalanche Verification: PASS");
         return;
     }
 

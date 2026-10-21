@@ -13,9 +13,11 @@ mod product;
 mod report;
 mod scenarios;
 mod sentinel;
+pub mod crypto;
 
-pub use bitnet::{argmax, corrupt, glyph_f32, ratio, reference, weight_census, GLYPHS};
+pub use bitnet::{argmax, corrupt, glyph_f32, ratio, reference, weight_census, TernaryModel, TernaryInferenceResult, GLYPHS};
 pub use cpu_alu::Alu;
+pub use crypto::{calculate_sac_percentage, ghost_spn_decrypt_block, ghost_spn_encrypt_block};
 pub use gpu::{available_adapters, AdapterInfo, BitnetSample, GpuEngine, GPU_ADD, GPU_AND, GPU_OR, GPU_SUB, GPU_XOR};
 pub use estimator_ablation::{ablation_benchmark, AblationReport};
 pub use product::{digit_qa, product_benchmark, DigitQa};
@@ -191,5 +193,83 @@ mod tests {
         assert_eq!(rtl_ratio_state(12, 0), 3);
         assert_eq!(rtl_ratio_state(0, 12), -3);
         assert_eq!(rtl_ratio_state(0, 0), 0);
+    }
+
+    #[test]
+    fn test_ghost_spn_crypto_and_sac() {
+        let key = *b"K3yF0rSpnC1ph3r!";
+        let salt = *b"C0nt3nt10nS4lt!#";
+        let plain = *b"Hello Aether DCC";
+        let cipher = super::ghost_spn_encrypt_block(&plain, &key, &salt, 4);
+        assert_ne!(plain, cipher);
+        let decrypted = super::ghost_spn_decrypt_block(&cipher, &key, &salt, 4);
+        assert_eq!(plain, decrypted, "SPN 4-round decryption mismatch");
+
+        let mut bad_key = key;
+        bad_key[0] ^= 1;
+        let bad_decrypted = super::ghost_spn_decrypt_block(&cipher, &bad_key, &salt, 4);
+        assert_ne!(plain, bad_decrypted, "Decryption succeeded with invalid key");
+
+        let sac = super::calculate_sac_percentage(&key, &salt);
+        assert!(
+            (45.0..=55.0).contains(&sac),
+            "SAC score {:.2}% is out of cryptographic diffusion bounds (45-55%)",
+            sac
+        );
+    }
+
+    #[test]
+    fn test_dynamic_ternary_model_inference() {
+        let model = super::TernaryModel::default_digits();
+        assert_eq!(model.input_features, 64);
+        assert_eq!(model.hidden_features, 16);
+        assert_eq!(model.output_classes, 10);
+        let (zeros, total, pct) = model.sparsity();
+        assert_eq!(zeros, 960);
+        assert_eq!(total, 1184);
+        assert!(pct > 80.0 && pct < 82.0);
+
+        for digit in 0..10 {
+            let glyph = super::glyph_f32(digit);
+            let res = model.infer(&glyph).expect("inference");
+            assert_eq!(res.predicted_class, digit as i32, "Mismatch on digit {digit}");
+        }
+    }
+
+    #[test]
+    fn test_c_abi_context_handles() {
+        unsafe {
+            let ctx = super::abi::dcc_context_create();
+            assert!(!ctx.is_null(), "dcc_context_create failed");
+
+            let glyph = super::glyph_f32(7);
+            let mut class_out = -1i32;
+            let mut scores_out = [0i32; 10];
+            let mut latency_us = 0.0f64;
+
+            let rc = super::abi::dcc_context_infer_digit10(
+                ctx,
+                glyph.as_ptr(),
+                &mut class_out,
+                scores_out.as_mut_ptr(),
+                &mut latency_us,
+            );
+            assert_eq!(rc, 0, "dcc_context_infer_digit10 returned error");
+            assert_eq!(class_out, 7, "Predicted class should be 7");
+            assert!(latency_us > 0.0, "latency must be positive");
+
+            super::abi::dcc_context_destroy(ctx);
+        }
+    }
+
+    #[test]
+    fn test_universal_adapter_enumeration() {
+        let adapters = super::available_adapters();
+        assert!(!adapters.is_empty(), "No adapters found on system");
+        let first = &adapters[0];
+        assert!(!first.name.is_empty(), "Adapter name is empty");
+
+        let engine = super::GpuEngine::try_new_with_selector(Some("0"));
+        assert!(engine.is_ok(), "Failed to create GPU engine with index 0: {:?}", engine.err());
     }
 }

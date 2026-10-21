@@ -785,19 +785,48 @@ pub struct GpuEngine {
     bn_w2_srv: *mut c_void,
     bn_uav: *mut c_void,
     pub info: AdapterInfo,
-    _guard: MutexGuard<'static, ()>,
 }
 
 unsafe impl Send for GpuEngine {}
 
 impl GpuEngine {
     pub fn try_new() -> Result<Self, String> {
-        let guard = gpu_lock();
+        Self::try_new_with_selector(None)
+    }
+
+    pub fn try_new_with_selector(selector: Option<&str>) -> Result<Self, String> {
+        let _guard = gpu_lock();
         let mut adapters = enumerate_adapters();
         if adapters.is_empty() {
             return Err("DXGI enumerated no adapters on this system".into());
         }
-        adapters.sort_by(|a, b| adapter_rank(&b.desc, &b.name).cmp(&adapter_rank(&a.desc, &a.name)));
+
+        let env_selector = std::env::var("AETHER_DCC_ADAPTER").ok();
+        let sel = selector.or(env_selector.as_deref());
+
+        if let Some(target) = sel {
+            if let Ok(idx) = target.parse::<usize>() {
+                if idx < adapters.len() {
+                    let chosen = adapters.remove(idx);
+                    adapters.insert(0, chosen);
+                }
+            } else {
+                let target_lower = target.to_lowercase();
+                adapters.sort_by(|a, b| {
+                    let a_match = a.name.to_lowercase().contains(&target_lower)
+                        || format!("{:04x}", a.desc.vendor_id).contains(&target_lower)
+                        || format!("{:04x}", a.desc.device_id).contains(&target_lower);
+                    let b_match = b.name.to_lowercase().contains(&target_lower)
+                        || format!("{:04x}", b.desc.vendor_id).contains(&target_lower)
+                        || format!("{:04x}", b.desc.device_id).contains(&target_lower);
+                    b_match.cmp(&a_match).then_with(|| {
+                        adapter_rank(&b.desc, &b.name).cmp(&adapter_rank(&a.desc, &a.name))
+                    })
+                });
+            }
+        } else {
+            adapters.sort_by(|a, b| adapter_rank(&b.desc, &b.name).cmp(&adapter_rank(&a.desc, &a.name)));
+        }
 
         let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         let mut last_err = String::new();
@@ -914,7 +943,6 @@ impl GpuEngine {
                 bn_w2_srv: create_srv(device, bn_w2, 160),
                 bn_uav: create_uav(device, bn_out, 26),
                 info,
-                _guard: guard,
             });
         }
         Err(if last_err.is_empty() { "No suitable D3D11 compute adapter found".into() } else { last_err })
@@ -922,6 +950,10 @@ impl GpuEngine {
 
     pub fn new() -> Self {
         Self::try_new().expect("D3D11 compute engine initialization")
+    }
+
+    pub fn new_with_selector(selector: Option<&str>) -> Self {
+        Self::try_new_with_selector(selector).expect("D3D11 compute engine initialization with selector")
     }
 
     pub fn feature_name(&self) -> &'static str {
